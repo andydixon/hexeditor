@@ -1,0 +1,28 @@
+[package]
+name = "hexeditor"
+version = "0.1.0"
+edition = "2024"
+
+
+[dependencies]
+# Add the "csr" feature to yew
+yew = { version = "0.21", features = ["csr"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = [
+    "File",
+    "FileList",
+    "FileReader",
+    "HtmlInputElement",
+    "Blob",
+    "Url",
+    "HtmlAnchorElement",
+    "MouseEvent",
+    "ProgressEvent",
+    "Event",
+    "Element",
+] }
+js-sys = "0.3"
+# Add the "futures" feature to gloo-file
+gloo-file = { version = "0.3", features = ["futures"] }
+hex = "0.4"
