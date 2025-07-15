@@ -76,7 +76,7 @@ You'll need the Rust toolchain and Trunk, which is a fantastic bundler for Rust 
 
 ---
 
-## ## A Look Under the Bonnet (How it Works)
+## A Look Under the Bonnet (How it Works)
 
 The most interesting bit of this project is the virtualization. When you first try to render a massive file by creating an `<input>` for every single byte, the browser's DOM (Document Object Model) gets absolutely flooded. It has to manage hundreds of thousands, or even millions, of individual elements, and it just gives up.
 
@@ -90,7 +90,7 @@ The result? The browser is only ever managing a few dozen table rows at any give
 
 ---
 
-## ## Future Ideas & Brain Dump
+## Future Ideas & Brain Dump
 
 Right, so my brain didn't stop firing off ideas just because the main thing works. Here's a totally unordered list of things that would be absolutely brilliant to add, in no particular order whatsoever.
 
@@ -103,7 +103,7 @@ Right, so my brain didn't stop firing off ideas just because the main thing work
 
 ---
 
-## ## Licence
+## Licence
 
 This project is licensed under the **GNU General Public License v3.0**.
 
