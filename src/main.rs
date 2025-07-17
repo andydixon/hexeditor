@@ -1,12 +1,18 @@
-use web_sys::{HtmlInputElement, Url, Element};
+use web_sys::{HtmlInputElement, Url, Element, HtmlSelectElement};
 use yew::prelude::*;
 use gloo_file::File;
 use gloo_file::futures::read_as_bytes;
 use wasm_bindgen::JsCast;
 
 const BYTES_PER_ROW: usize = 16;
-const ROW_HEIGHT: f64 = 29.6; // The measured or estimated height of a single table row in pixels.
-const OVERSCAN_ROWS: usize = 10; // Render a few extra rows above and below the viewport.
+const ROW_HEIGHT: f64 = 29.6;
+const OVERSCAN_ROWS: usize = 10;
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum SearchMode {
+    Hex,
+    Ascii,
+}
 
 pub enum Msg {
     LoadFile(File),
@@ -15,6 +21,11 @@ pub enum Msg {
     UpdateByte(usize, String),
     SaveFile,
     Scrolled(Event),
+    UpdateSearchTerm(String),
+    UpdateSearchMode(SearchMode),
+    ExecuteSearch,
+    FindNext,
+    FindPrevious,
 }
 
 pub struct HexEditor {
@@ -24,6 +35,12 @@ pub struct HexEditor {
     scroll_top: f64,
     container_height: f64,
     scroll_container_ref: NodeRef,
+    search_term: String,
+    search_mode: SearchMode,
+    search_bytes: Vec<u8>,
+    search_results: Vec<usize>,
+    current_match_index: Option<usize>,
+    search_status: String,
 }
 
 impl Component for HexEditor {
@@ -38,6 +55,12 @@ impl Component for HexEditor {
             scroll_top: 0.0,
             container_height: 500.0,
             scroll_container_ref: NodeRef::default(),
+            search_term: String::new(),
+            search_mode: SearchMode::Ascii,
+            search_bytes: Vec::new(),
+            search_results: Vec::new(),
+            current_match_index: None,
+            search_status: String::new(),
         }
     }
 
@@ -58,6 +81,9 @@ impl Component for HexEditor {
                 self.file_data = data;
                 self.error = None;
                 self.scroll_top = 0.0;
+                self.search_results.clear();
+                self.current_match_index = None;
+                self.search_status.clear();
                 true
             }
             Msg::FileLoadError(err_msg) => {
@@ -90,8 +116,65 @@ impl Component for HexEditor {
             }
             Msg::Scrolled(e) => {
                 let target: Element = e.target_unchecked_into();
-                // FIX 1: Cast the i32 from scroll_top() into our f64 field.
                 self.scroll_top = target.scroll_top() as f64;
+                true
+            }
+            Msg::UpdateSearchTerm(term) => {
+                self.search_term = term;
+                true
+            }
+            Msg::UpdateSearchMode(mode) => {
+                self.search_mode = mode;
+                true
+            }
+            Msg::ExecuteSearch => {
+                self.search_results.clear();
+                self.current_match_index = None;
+                let search_bytes = match self.search_mode {
+                    SearchMode::Ascii => self.search_term.as_bytes().to_vec(),
+                    SearchMode::Hex => {
+                        let cleaned: String = self.search_term.chars().filter(|c| !c.is_whitespace()).collect();
+                        match hex::decode(cleaned) {
+                            Ok(bytes) => bytes,
+                            Err(_) => {
+                                self.search_status = "Invalid Hex sequence.".to_string();
+                                return true;
+                            }
+                        }
+                    }
+                };
+                if search_bytes.is_empty() {
+                    self.search_status = "".to_string();
+                    return true;
+                }
+                self.search_bytes = search_bytes.clone();
+                self.search_results = self.file_data
+                    .windows(search_bytes.len())
+                    .enumerate()
+                    .filter_map(|(i, window)| if window == search_bytes.as_slice() { Some(i) } else { None })
+                    .collect();
+                if self.search_results.is_empty() {
+                    self.search_status = "Not found.".to_string();
+                } else {
+                    let count = self.search_results.len();
+                    self.search_status = format!("Found {} match(es).", count);
+                    self.jump_to_match(0);
+                }
+                true
+            }
+            Msg::FindNext => {
+                if !self.search_results.is_empty() {
+                    let next_index = self.current_match_index.map_or(0, |i| (i + 1) % self.search_results.len());
+                    self.jump_to_match(next_index);
+                }
+                true
+            }
+            Msg::FindPrevious => {
+                if !self.search_results.is_empty() {
+                    let total = self.search_results.len();
+                    let prev_index = self.current_match_index.map_or(total - 1, |i| (i + total - 1) % total);
+                    self.jump_to_match(prev_index);
+                }
                 true
             }
         }
@@ -99,7 +182,6 @@ impl Component for HexEditor {
 
     fn rendered(&mut self, _ctx: &Context<Self>, first_render: bool) {
         if first_render {
-            // FIX 2: Cast the NodeRef to an Element to get client_height.
             if let Some(element) = self.scroll_container_ref.cast::<web_sys::Element>() {
                 self.container_height = element.client_height() as f64;
             }
@@ -117,16 +199,25 @@ impl Component for HexEditor {
             }
             Msg::FileLoadError("No file selected.".to_string())
         });
-
+        let on_search_input = link.callback(|e: InputEvent| {
+            let input: HtmlInputElement = e.target_unchecked_into();
+            Msg::UpdateSearchTerm(input.value())
+        });
+        
+        let on_search_mode_change = link.callback(|e: Event| {
+            let select: HtmlSelectElement = e.target_unchecked_into();
+            match select.value().as_str() {
+                "hex" => Msg::UpdateSearchMode(SearchMode::Hex),
+                _ => Msg::UpdateSearchMode(SearchMode::Ascii),
+            }
+        });
+        
         let total_rows = (self.file_data.len() as f64 / BYTES_PER_ROW as f64).ceil() as usize;
         let total_height = total_rows as f64 * ROW_HEIGHT;
-
         let first_visible_row = (self.scroll_top / ROW_HEIGHT).floor() as usize;
         let num_visible_rows = (self.container_height / ROW_HEIGHT).ceil() as usize;
-
         let start_row = first_visible_row.saturating_sub(OVERSCAN_ROWS / 2);
         let end_row = (first_visible_row + num_visible_rows + OVERSCAN_ROWS / 2).min(total_rows);
-
         let visible_data_slice = if self.file_data.is_empty() || start_row >= end_row {
             &[]
         } else {
@@ -134,9 +225,7 @@ impl Component for HexEditor {
             let end_byte = (end_row * BYTES_PER_ROW).min(self.file_data.len());
             &self.file_data[start_byte..end_byte]
         };
-
         let on_scroll = link.callback(Msg::Scrolled);
-
         html! {
             <div class="container mt-4">
                 <header class="d-flex justify-content-between align-items-center mb-4 p-3 bg-dark-subtle rounded">
@@ -149,19 +238,32 @@ impl Component for HexEditor {
                         <span class="badge bg-info">{ &self.file_name }</span>
                     </div>
                 </header>
-
                 if let Some(err) = &self.error {
                     <div class="alert alert-danger">{ err }</div>
                 }
-
                 <div class="mb-3 d-flex gap-2">
                     <input class="form-control" type="file" onchange={on_file_change} />
                     <button class="btn btn-primary" onclick={link.callback(|_| Msg::SaveFile)} disabled={self.file_data.is_empty()}>
                         { "Save" }
                     </button>
                 </div>
-
-                // FIX 3: Use explicit `onscroll={...}` instead of shorthand `{...}`.
+                <div class="card bg-dark-subtle mb-3">
+                    <div class="card-body">
+                        <div class="d-flex gap-2 align-items-center">
+                            <select class="form-select" style="width: 100px;" onchange={on_search_mode_change}>
+                                <option value="ascii" selected={self.search_mode == SearchMode::Ascii}>{"ASCII"}</option>
+                                <option value="hex" selected={self.search_mode == SearchMode::Hex}>{"Hex"}</option>
+                            </select>
+                            <input type="text" class="form-control" placeholder="Enter search term..." value={self.search_term.clone()} oninput={on_search_input} />
+                            <button class="btn btn-secondary" onclick={link.callback(|_| Msg::ExecuteSearch)}>{"Search"}</button>
+                            <div class="btn-group">
+                                <button class="btn btn-outline-secondary" onclick={link.callback(|_| Msg::FindPrevious)} disabled={self.search_results.is_empty()}>{"<"}</button>
+                                <button class="btn btn-outline-secondary" onclick={link.callback(|_| Msg::FindNext)} disabled={self.search_results.is_empty()}>{">"}</button>
+                            </div>
+                        </div>
+                        <div class="form-text mt-1">{ &self.search_status }</div>
+                    </div>
+                </div>
                 <div ref={self.scroll_container_ref.clone()} class="scroll-container" onscroll={on_scroll}>
                     <div class="scroll-sizer" style={format!("height: {}px;", total_height)}>
                         <table class="table table-dark table-sm table-hover mb-0 virtual-table" style={format!("transform: translateY({}px);", start_row as f64 * ROW_HEIGHT)}>
@@ -178,51 +280,64 @@ impl Component for HexEditor {
                         </table>
                     </div>
                 </div>
-
                 <footer class="text-center text-muted mt-4">
-                    <p>{ "Built by " }<a href="https://www.andydixon.com" target="_blank">{"Andy Dixon"}</a> { " with Rust." }</p>
+                     <p>{ "Built by " }<a href="https://www.andydixon.com" target="_blank">{"Andy Dixon"}</a> { " with Rust." }</p>
                 </footer>
             </div>
         }
     }
 }
 
+// --- HELPER METHODS IMPL BLOCK ---
+// All helper methods are now correctly placed here.
 impl HexEditor {
-
-fn view_row(&self, ctx: &Context<Self>, row_idx: usize, bytes: &[u8]) -> Html {
-    let offset = row_idx * BYTES_PER_ROW;
-    let link = ctx.link();
-
-    html! {
-        <tr>
-            <td class="text-secondary">{ format!("{:08X}", offset) }</td>
-            { for bytes.iter().enumerate().map(|(i, byte)| {
-                let byte_idx = offset + i;
-                // The callback now expects a generic `Event` from `onchange`.
-                let on_hex_change = link.callback(move |e: Event| { // <-- 1. Type changed to Event
-                    let input: HtmlInputElement = e.target_unchecked_into();
-                    Msg::UpdateByte(byte_idx, input.value())
-                });
-                html!{
-                    <td class="text-center">
-                        <input
-                            type="text"
-                            class="hex-input"
-                            value={format!("{:02X}", byte)}
-                            onchange={on_hex_change} // <-- 2. Event changed to onchange
-                            maxlength="2"
-                        />
-                    </td>
-                }
-            }) }
-            { for (0..(BYTES_PER_ROW - bytes.len())).map(|_| html!{ <td></td> }) }
-            <td class="ascii-char">{
-                bytes.iter().map(|&b| if (32..=126).contains(&b) { b as char } else { '.' }).collect::<String>()
-            }</td>
-        </tr>
+    fn jump_to_match(&mut self, result_index: usize) {
+        if let Some(&match_start_byte) = self.search_results.get(result_index) {
+            self.current_match_index = Some(result_index);
+            let target_row = (match_start_byte / BYTES_PER_ROW) as f64;
+            let scroll_pos = target_row * ROW_HEIGHT - (self.container_height / 2.0);
+            
+            // This logic was missing from the previous attempt.
+            // It scrolls the view to the new position.
+            if let Some(element) = self.scroll_container_ref.cast::<web_sys::Element>() {
+                element.set_scroll_top(scroll_pos.max(0.0) as i32);
+            }
+        }
     }
-}
 
+    fn view_row(&self, ctx: &Context<Self>, row_idx: usize, bytes: &[u8]) -> Html {
+        let offset = row_idx * BYTES_PER_ROW;
+        let link = ctx.link();
+        let current_match_range = self.current_match_index.and_then(|idx| {
+            self.search_results.get(idx).map(|&start| start..(start + self.search_bytes.len()))
+        });
+        html! {
+            <tr>
+                <td class="text-secondary">{ format!("{:08X}", offset) }</td>
+                { for bytes.iter().enumerate().map(|(i, byte)| {
+                    let byte_idx = offset + i;
+                    let on_hex_change = link.callback(move |e: Event| {
+                        let input: HtmlInputElement = e.target_unchecked_into();
+                        Msg::UpdateByte(byte_idx, input.value())
+                    });
+                    let is_highlighted = current_match_range.as_ref().map_or(false, |range| range.contains(&byte_idx));
+                    let mut class = "hex-input".to_string();
+                    if is_highlighted {
+                        class.push_str(" highlight");
+                    }
+                    html!{
+                        <td class="text-center">
+                            <input type="text" {class} value={format!("{:02X}", byte)} onchange={on_hex_change} maxlength="2" />
+                        </td>
+                    }
+                }) }
+                { for (0..(BYTES_PER_ROW - bytes.len())).map(|_| html!{ <td></td> }) }
+                <td class="ascii-char">{
+                    bytes.iter().map(|&b| if (32..=126).contains(&b) { b as char } else { '.' }).collect::<String>()
+                }</td>
+            </tr>
+        }
+    }
 }
 
 fn main() {
